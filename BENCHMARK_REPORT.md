@@ -94,43 +94,68 @@ Nếu bước cuối thoát code 1 (accuracy tụt hoặc regression), job đỏ
 
 ---
 
-## 4. Observability stack (production)  — *(làm ở CP8, sau giờ lab)*
+## 4. Observability stack (production)
 
-### 4.1 Screenshot
-- [ ] `grafana-dashboard.png` — Grafana khi đang có tải (Golden Signals)
-- [ ] `jaeger-slow-trace.png` — trace chậm (span chiếm thời gian)
-- [ ] `jaeger-error-trace.png` — trace lỗi (event `exception`)
-- [ ] `prometheus-alert-firing.png` — ≥ 2 alert đang **firing**
+Stack: `docker compose -p k5-day14-observability up -d --build` (agent×N + nginx + prometheus + grafana + jaeger + locust). Tải tạo bằng Locust. *(Lưu ý: Dockerfile production gốc đặt HOME của user `agent` là `/app` nhưng copy package vào `/home/agent/.local` → đã sửa `PYTHONPATH` để import được, nếu không agent crash `ModuleNotFoundError: uvicorn`.)*
 
-### 4.2 Thí nghiệm "phá hệ thống"
+### 4.1 Screenshot (trong `screenshots/`)
+- [x] `grafana-dashboard.png` — Grafana khi đang có tải (Golden Signals, có panel đỏ lúc chaos)
+- [x] `jaeger-slow-trace.png` — trace chậm `8d5aad81ba1b3d518014dcf1e1d9f34f`
+- [x] `jaeger-error-trace.png` — trace lỗi `799483272cffce7608046214c26347c1` (span `chat` có event exception)
+- [x] `prometheus-alert-firing.png` — 3 alert đang **firing**
 
-| # | Thay đổi | Alert nào firing | Thời gian từ lúc đổi → firing | Panel phản ánh rõ nhất |
+### 4.2 Thí nghiệm "phá hệ thống" (chaos qua `.env` + `docker compose up -d`)
+
+Chạy A và B đồng thời (`MOCK_ERROR_RATE=0.2`, `MOCK_SLOW_RATE=0.3`), scale agent=3, Locust 80 user:
+
+| # | Thay đổi | Alert firing | Thời gian từ lúc tạo tải → firing | Panel phản ánh rõ nhất |
 |---|---|---|---|---|
-| A | `MOCK_ERROR_RATE=0.2` | | | |
-| B | `MOCK_SLOW_RATE=0.3` | | | |
-| C | `LLM_MODEL=mock-llm-large` | | | |
-| D | `docker pause` 1 instance | | | |
-| E | `AGENT_VERSION=v1` | | | |
+| A | `MOCK_ERROR_RATE=0.2` | **AgentHighErrorRate** (value ~19.5%) | ~**70s** (`for: 1m` + ~10s trễ của `rate[1m]`) | Error rate |
+| B | `MOCK_SLOW_RATE=0.3` | **AgentHighLatencyP95** (value ~1.9s) | ~**131s** (`for: 2m`) | p95 latency |
+| C | `LLM_MODEL=mock-llm-large` | **LLMCostBurnRateHigh** (value ~$4.05/giờ) | firing khi cost rate > $2/giờ (trong lần chạy scale_3 tải nặng) | Cost USD/giờ |
+| D | `docker pause` 1 instance | *(dự kiến)* AgentInstanceDown sau ~30s (`up==0`) | — | Instances up |
+| E | `AGENT_VERSION=v1` | **Không có alert** | — | — |
 
-### 4.3 Debug bằng trace
-- `trace_id`: ...
-- Tổng thời gian / span chậm nhất / dòng log cùng `trace_id`: *(CP8)*
+**Thí nghiệm E không làm alert nào firing — phát hiện bằng cách nào?** Lỗi của E là lỗi **chất lượng** (v1 trả lời sai nhiều), không làm error rate/latency/cost hạ tầng xấu đi nên không alert nào bắt được. Phải phát hiện bằng **eval định kỳ trên golden dataset** (như Part 7 Bước 1): accuracy tụt → quality gate đỏ. Observability hạ tầng (metrics/trace) chỉ thấy "có vấn đề không" về tốc độ/lỗi, không thấy "trả lời có đúng không".
+
+### 4.3 Debug bằng trace (chọn trace chậm nhất)
+
+- `trace_id`: **8d5aad81ba1b3d518014dcf1e1d9f34f**
+- Tổng thời gian: ~**1699 ms**
+- Span chiếm nhiều thời gian nhất: **`chat mock-llm-small` = 1698.9 ms (~99%)** → nút thắt ở bước gọi LLM, không phải retrieval (~20ms) hay code của mình.
+- Dòng log JSON cùng `trace_id` (grep log agent):
+
+```json
+{"ts":"2026-11-25T11:02:30.530125+00:00","level":"INFO","service":"observable-agent","instance":"7f9babe92761","event":"llm_call","trace_id":"8d5aad81ba1b3d518014dcf1e1d9f34f","span_id":"126f7f19dfc78ce8","request_id":"eb9ddd560ad7","model":"mock-llm-small","agent_version":"v2","input_tokens":95,"output_tokens":55,"cost_usd":4.7e-05,"llm_ms":1698.9}
+```
+
+Trace lỗi (cho `jaeger-error-trace.png`): `trace_id` **799483272cffce7608046214c26347c1**, span `chat mock-llm-small` có event `exception` (`Upstream LLM error: 503 Service Unavailable (mock)`), agent trả **503**. Dòng log tương ứng:
+
+```json
+{"ts":"2026-11-25T11:00:37.151916+00:00","level":"INFO","service":"observable-agent","instance":"b54c3ddba33f","event":"llm_error","trace_id":"799483272cffce7608046214c26347c1","span_id":"751fb6746f261b73","request_id":"41fa7d223825","error":"Upstream LLM error: 503 Service Unavailable (mock)"}
+```
 
 ---
 
-## 5. Benchmark scaling (production, Locust headless, 100 users, 2 phút) — *(làm ở CP8)*
+## 5. Benchmark scaling (production, Locust headless, 100 users, 2 phút)
+
+Lệnh: `docker compose -p k5-day14-observability run --rm locust ... --headless -u 100 -r 10 -t 2m --csv /mnt/results/scale_N` (file `benchmark-results/scale_1_stats.csv`, `scale_3_stats.csv`).
 
 | Số instance | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Failures |
 |---|---|---|---|---|---|
-| 1 | | | | | |
-| 3 | | | | | |
+| 1 | 66.2 | 190 | 240 | 1700 | 58 / 7853 (0.74%) |
+| 3 | 65.7 | 190 | 230 | 1700 | 62 / 7861 (0.79%) |
+
+**Giải thích:** Scale 1 → 3 instance **gần như không đổi** RPS (66.2 → 65.7) lẫn p95 (240 → 230ms). Nút thắt **không** phải CPU của agent mà là **thời gian của dependency hạ nguồn (mock LLM ~150–190ms/call)** và **offered load có hạn** (100 user, nghỉ 0.5–2s → chỉ ~66 req/s, đã dưới ngưỡng bão hoà của **một** instance). Thêm instance chỉ giúp khi nút thắt là CPU/đồng thời tại agent; ở đây mỗi request phần lớn là *chờ* LLM nên panel "LLM p95 latency" gần như phẳng dù scale lên 3. Muốn cải thiện phải giảm latency LLM (cache, model nhanh hơn, streaming) hoặc tăng tải để thấy lợi ích của scale.
 
 ---
 
-## 6. Kết luận (phần hiệu năng & chất lượng — CP7)
+## 6. Kết luận
 
-- 3 điều học được:
-  1. **avg che giấu tail latency** — phải đặt SLO theo p95/p99; slow 10% không đổi avg nhưng p95 nhảy từ 220ms lên 1676ms.
+- 5 điều học được về benchmark & observability:
+  1. **avg che giấu tail latency** — đặt SLO theo p95/p99; slow 10% không đổi avg (189→295ms) nhưng p95 nhảy 220→1676ms.
   2. **Throughput có điểm bão hoà** — tăng concurrency qua điểm đó (c≈100) làm p95 xấu đi mà RPS không tăng.
-  3. **So sánh phiên bản bằng *cost / câu đúng*** — v2 tốn token gấp đôi nhưng rẻ hơn ~11× mỗi câu trả lời đúng; và quality gate dựa trên eval + exit code mới chặn được regression mà metric hạ tầng không thấy.
-- Lên production thật sẽ thêm: alert theo **error budget burn rate**, metric/alert ở **tầng load balancer** (bắt 504 mà agent không thấy), và **eval định kỳ trên traffic thật** để bắt lỗi chất lượng.
+  3. **So sánh phiên bản bằng *cost / câu đúng*** — v2 tốn token gấp đôi nhưng rẻ hơn ~11× mỗi câu đúng; quality gate (eval + exit code) chặn regression mà metric hạ tầng không thấy.
+  4. **Scale ngang không phải lúc nào cũng giúp** — khi nút thắt là latency dependency, thêm instance không cải thiện p95.
+  5. **Alert cần `for` + ngưỡng lỏng hơn SLO** — ErrorRate fire sau 1m, LatencyP95 sau 2m, tránh báo động vì spike ngắn; và lỗi chất lượng (E) không có alert hạ tầng nào bắt.
+- Lên production thật sẽ thêm: alert theo **error budget burn rate**, metric/alert ở **tầng load balancer** (bắt 504 mà agent không đếm), và **eval định kỳ trên traffic thật** để bắt lỗi chất lượng.

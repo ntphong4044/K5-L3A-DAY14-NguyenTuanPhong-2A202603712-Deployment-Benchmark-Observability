@@ -26,7 +26,9 @@ RUN chown -R agent:agent /app
 USER agent
 
 ENV PATH=/home/agent/.local/bin:$PATH
-ENV PYTHONPATH=/app
+# user `agent` có HOME=/app nên user-site mặc định (/app/.local) không khớp nơi copy
+# package (/home/agent/.local). Thêm site-packages vào PYTHONPATH để import được.
+ENV PYTHONPATH=/app:/home/agent/.local/lib/python3.11/site-packages
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
