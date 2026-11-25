@@ -281,7 +281,37 @@ Instances used: {instance-fc8677, instance-4204a5, instance-c3f834}   # 3 instan
 
 ## Part 6 — Final Project: Output check_production_ready.py
 
-<!-- CP5: dán phần "📋 Checklist Deliverable" của output PASS 12/12 -->
+Chạy `python check_production_ready.py` (đầy đủ, có Docker) trong `06-lab-complete/` → **PASS 12/12**. Image đo được **297 MB** (< 500 MB); `docker stop` tắt êm exit 0 trong 0.8s.
+
+```text
+================================================================
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
+```
+
+Điểm nhấn triển khai (code trong `06-lab-complete/app/`):
+- `/health` luôn 200 (không chạm Redis); `/ready` ping Redis → 503 khi Redis chết.
+- `X-API-Key` sai/thiếu → 401 (dùng `secrets.compare_digest`).
+- Rate limit sliding-window bằng Redis sorted set → 429 + `Retry-After`; state trong Redis nên restart agent vẫn bị chặn (chứng minh stateless).
+- Cost guard cộng dồn chi phí vào Redis (daily/monthly) → 402 khi vượt budget.
+- Structured logging: mỗi dòng log app là 1 JSON object (`JsonFormatter`).
+- Graceful shutdown qua FastAPI `lifespan`; Dockerfile `CMD` dùng `exec uvicorn` để uvicorn là PID 1 → nhận SIGTERM, `docker stop` thoát code 0.
+- Dockerfile multi-stage (builder + runtime `python:3.11-slim`), user non-root, `HEALTHCHECK`, `CMD` nghe theo `$PORT`.
 
 ---
 
@@ -294,3 +324,4 @@ Instances used: {instance-fc8677, instance-4204a5, instance-c3f834}   # 3 instan
 - **CP2 (Part 2 answers):** Hỏi AI cách đọc Dockerfile multi-stage và compose. Tự kiểm tra: tự build 2 image và đo `docker images` (develop 1.67 GB, advanced 240 MB), tự chạy container develop + stack compose và curl qua Nginx; mọi con số MB là số mình đo, không chép từ README.
 - **CP3 (Part 4 answers):** Hỏi AI cách lấy JWT token và tạo vòng lặp curl để thấy 429. Tự kiểm tra: tự chạy bản develop + production, tự lấy token `student/demo123`, tự chạy vòng 13 request và thấy 429 từ request thứ 11 (header `retry-after`). Token đã che trước khi dán.
 - **CP4 (Part 5 answers):** Hỏi AI về khác biệt liveness/readiness và stateless. Tự kiểm tra: tự `docker compose up --scale agent=3` rồi chạy `test_stateless.py`, quan sát 3 instance ID thật và history 10 message; số liệu trong bài là output mình chạy.
+- **CP5 (Part 6 — code):** Dùng AI gợi ý cách sửa các `TODO` trong `06-lab-complete/app/` (config từ env, APIKeyHeader→401, rate limit sliding-window Redis sorted set, cost guard Redis, JsonFormatter, lifespan, Dockerfile multi-stage, compose, railway/render). Mình đọc kỹ `check_production_ready.py` để hiểu từng tiêu chí (vd `/health` phải 200 khi Redis chết, `/ready` 503; state rate-limit phải nằm trong Redis để sống qua restart; uvicorn phải là PID 1 cho SIGTERM). Tự kiểm tra: chạy `check_production_ready.py --skip-docker` (39/39) rồi bản đầy đủ có Docker → **PASS 12/12 (43/43 checks)**, giải thích được từng dòng code khi được hỏi.
