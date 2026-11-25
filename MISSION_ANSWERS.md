@@ -168,13 +168,70 @@ Dọn stack: `docker compose -f 02-docker/production/docker-compose.yml -p k5-da
 
 ## Part 4 — API Security
 
-### Exercise 4.1–4.3 — Kết quả test (401 / 200 / 429)
+### Exercise 4.1 — Develop: API Key (`X-API-Key`)
 
-<!-- CP3: output curl -i, che token -->
+Chạy: `AGENT_API_KEY=secret-key-123 uvicorn app:app` trong `04-api-gateway/develop/`.
+
+```text
+# [THIẾU KEY] POST /ask  -> 401
+HTTP/1.1 401 Unauthorized
+{"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
+
+# [SAI KEY] POST /ask (X-API-Key: wrong-key)  -> 403
+HTTP/1.1 403 Forbidden
+{"detail":"Invalid API key."}
+
+# [ĐÚNG KEY] POST /ask (X-API-Key: secret-key-123)  -> 200
+HTTP/1.1 200 OK
+{"question":"what is docker?","answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}
+```
+
+### Exercise 4.2 — Production: lấy JWT token (`student`/`demo123`)
+
+```text
+POST /auth/token  {"username":"student","password":"demo123"}  -> 200
+{"access_token":"eyJhbGciOiJI...<MASKED>","token_type":"bearer","expires_in_minutes":60,
+ "hint":"Authorization: Bearer <MASKED>"}
+```
+(Token đã che. Tài khoản `student` giới hạn **10 req/phút**, budget $1/ngày.)
+
+### Exercise 4.3 — Production: 401 / 200 / 429 (dùng token ở 4.2)
+
+```text
+# [KHÔNG TOKEN] POST /ask  -> 401
+HTTP/1.1 401 Unauthorized
+www-authenticate: Bearer
+x-content-type-options: nosniff
+x-frame-options: DENY
+{"detail":"Authentication required. Include: Authorization: Bearer <token>"}
+
+# [CÓ TOKEN hợp lệ] POST /ask (Authorization: Bearer <MASKED>)  -> 200
+HTTP/1.1 200 OK
+{"question":"what is docker?","answer":"Container là cách đóng gói app...",
+ "usage":{"requests_remaining":9,"budget_remaining_usd":1.9e-05}}
+
+# [VÒNG LẶP] 13 request cùng token:
+request #1..#9  -> HTTP 200
+request #10..#13 -> HTTP 429      # chạm giới hạn 10/phút (1 request 200 trước đó + 9 = 10)
+
+# curl -i request bị chặn -> 429 kèm Retry-After
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795599805
+retry-after: 59
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":59}}
+```
 
 ### Exercise 4.4 — Cost guard
 
-<!-- CP3: giải thích cách làm -->
+`cost_guard.py` cộng dồn chi phí LLM **theo ngày, theo user**:
+- Giá quy đổi theo token: `cost = input_tokens/1000 * $0.00015 + output_tokens/1000 * $0.0006` (tham khảo gpt-4o-mini). Trong agent, token được ước lượng từ số từ của câu hỏi/câu trả lời (`len(text.split())*2`).
+- `check_budget(user)` gọi **trước** khi gọi LLM: nếu tổng chi phí trong ngày của user ≥ `DAILY_BUDGET_USD` → raise **402 Payment Required**; nếu tổng chi phí toàn hệ thống ≥ global budget → 503.
+- `record_usage(user, in, out)` gọi **sau** khi gọi LLM: cộng token vào bản ghi trong ngày, đồng thời cảnh báo (log) khi dùng ≥ 80% budget.
+- Nhờ check trước + ghi sau, một user tiêu quá ngân sách sẽ bị chặn ở request kế tiếp thay vì để hoá đơn LLM tăng không kiểm soát.
+
+**Cần hiểu:** rate limit bảo vệ **tốc độ** (chống spam/DoS, giữ tài nguyên cho mọi user) và trả **429**; cost guard bảo vệ **tiền** (chặn hoá đơn LLM vượt ngân sách) và trả **402**. Cần cả hai vì một user có thể gọi *trong* giới hạn tốc độ nhưng mỗi request lại tốn nhiều token → vẫn cháy ngân sách; ngược lại nhiều request rẻ cũng cần chặn bằng rate limit.
 
 ---
 
@@ -199,3 +256,4 @@ Dọn stack: `docker compose -f 02-docker/production/docker-compose.yml -p k5-da
 - **CP0 (setup):** Dùng AI trợ lý (Claude Code) để dựng môi trường WSL: cài `uv`, tạo venv Python 3.12, cài `requirements.txt`. Tự kiểm tra: chạy `uv pip`, import `fastapi/pydantic/redis/jwt/psutil` thành công, xác nhận `os.name == posix`.
 - **CP1 (Part 1 answers):** Hỏi AI cách đọc anti-pattern trong `develop/app.py` và đối chiếu với `production/`. Tự kiểm tra: tự chạy bản develop bằng `uvicorn`, curl `/`, `/ask?question=`, `/ask` JSON (422) và `/health` (404); số liệu/HTTP code trong bài là output mình chạy được.
 - **CP2 (Part 2 answers):** Hỏi AI cách đọc Dockerfile multi-stage và compose. Tự kiểm tra: tự build 2 image và đo `docker images` (develop 1.67 GB, advanced 240 MB), tự chạy container develop + stack compose và curl qua Nginx; mọi con số MB là số mình đo, không chép từ README.
+- **CP3 (Part 4 answers):** Hỏi AI cách lấy JWT token và tạo vòng lặp curl để thấy 429. Tự kiểm tra: tự chạy bản develop + production, tự lấy token `student/demo123`, tự chạy vòng 13 request và thấy 429 từ request thứ 11 (header `retry-after`). Token đã che trước khi dán.
