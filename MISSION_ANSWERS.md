@@ -237,9 +237,45 @@ retry-after: 59
 
 ## Part 5 — Scaling & Reliability
 
-### Exercise 5.1–5.5 — Ghi chú & kết quả test
+### Exercise 5.1 — Health vs Readiness
 
-<!-- CP4 -->
+- `GET /health` (**liveness**): trả 200 khi process còn sống. Platform dùng để quyết định có **restart container** không. Không phụ thuộc Redis.
+- `GET /ready` (**readiness**): ping Redis; kết nối được → 200, không → **503**. Load balancer dùng để quyết định có **route traffic** vào instance không. (Thấy rõ trong `production/app.py`: `/ready` ping Redis, lỗi → `HTTPException(503)`.)
+
+### Exercise 5.2 — Graceful shutdown
+
+Nhận `SIGTERM` (tín hiệu orchestrator gửi khi scale-in/deploy): ngừng nhận request mới, xử lý xong request đang chạy, đóng kết nối rồi thoát code 0. Dùng `lifespan` của FastAPI cho phần dọn dẹp; nếu tự đăng ký signal handler thì vẫn phải để uvicorn hoàn tất tắt. (Chi tiết đầy đủ sẽ làm ở CP5 và được `check_production_ready.py` kiểm bằng cách gửi SIGTERM lúc đang có request.)
+
+### Exercise 5.3 — Stateless design
+
+- **Anti-pattern:** giữ state trong RAM (`conversation_history = {}`); mỗi instance có vùng nhớ riêng → scale ra nhiều instance thì request rơi vào instance khác sẽ **không thấy** history.
+- **Đúng:** lưu state trong Redis (`save_session`/`load_session` dùng `setex`/`get`). Mọi instance đọc chung Redis nên session liên tục.
+
+### Exercise 5.4 — Load balancing (scale agent=3)
+
+```bash
+cd 05-scaling-reliability/production
+docker compose -p k5-day14-scaling up -d --build --scale agent=3   # stack mở cổng 8080, endpoint POST /chat
+```
+`docker compose -p k5-day14-scaling ps` → 3 service `agent`, 1 `nginx`, 1 `redis (healthy)`. Nginx round-robin upstream `agent:8000` qua DNS của Docker.
+
+### Exercise 5.5 — Test stateless (`python test_stateless.py`)
+
+```text
+Session ID: 00e0f4bb-5f9e-4ed6-9fba-91d75d44bbb5
+Request 1: [instance-fc8677]  Q: What is Docker?
+Request 2: [instance-c3f834]  Q: Why do we need containers?
+Request 3: [instance-4204a5]  Q: What is Kubernetes?
+Request 4: [instance-fc8677]  Q: How does load balancing work?
+Request 5: [instance-c3f834]  Q: What is Redis used for?
+Instances used: {instance-fc8677, instance-4204a5, instance-c3f834}   # 3 instance khác nhau
+--- Conversation History --- Total messages: 10   (5 user + 5 assistant)
+✅ Session history preserved across all instances via Redis!
+```
+
+**Giải thích kết quả:** 5 request trong **cùng một session** rơi vào **3 instance khác nhau** (round-robin của Nginx), nhưng khi đọc `/chat/{session}/history` vẫn đủ **10 message**. Chứng tỏ state nằm trong **Redis dùng chung**, không nằm trong RAM của từng instance — đúng tính chất stateless, scale ngang không mất dữ liệu. Dọn stack: `docker compose -p k5-day14-scaling down`.
+
+**Cần hiểu:** `/health` (liveness) khác `/ready` (readiness): liveness chỉ hỏi "process còn sống?" để restart, readiness hỏi "đã kết nối được dependency (Redis) chưa?" để route traffic — một agent vừa khởi động có thể *alive* nhưng *chưa ready*. State trong RAM hỏng khi chạy nhiều instance vì mỗi instance có bộ nhớ riêng, không instance nào thấy session của instance khác → phải đẩy state ra store chung (Redis).
 
 ---
 
@@ -257,3 +293,4 @@ retry-after: 59
 - **CP1 (Part 1 answers):** Hỏi AI cách đọc anti-pattern trong `develop/app.py` và đối chiếu với `production/`. Tự kiểm tra: tự chạy bản develop bằng `uvicorn`, curl `/`, `/ask?question=`, `/ask` JSON (422) và `/health` (404); số liệu/HTTP code trong bài là output mình chạy được.
 - **CP2 (Part 2 answers):** Hỏi AI cách đọc Dockerfile multi-stage và compose. Tự kiểm tra: tự build 2 image và đo `docker images` (develop 1.67 GB, advanced 240 MB), tự chạy container develop + stack compose và curl qua Nginx; mọi con số MB là số mình đo, không chép từ README.
 - **CP3 (Part 4 answers):** Hỏi AI cách lấy JWT token và tạo vòng lặp curl để thấy 429. Tự kiểm tra: tự chạy bản develop + production, tự lấy token `student/demo123`, tự chạy vòng 13 request và thấy 429 từ request thứ 11 (header `retry-after`). Token đã che trước khi dán.
+- **CP4 (Part 5 answers):** Hỏi AI về khác biệt liveness/readiness và stateless. Tự kiểm tra: tự `docker compose up --scale agent=3` rồi chạy `test_stateless.py`, quan sát 3 instance ID thật và history 10 message; số liệu trong bài là output mình chạy.
