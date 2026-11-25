@@ -154,15 +154,35 @@ Dọn stack: `docker compose -f 02-docker/production/docker-compose.yml -p k5-da
 
 ### Exercise 3.1 / 3.2 — Deploy agent Part 6
 
-<!-- CP6: URL public + screenshot -->
+- **Nền tảng chính:** Render (Web Service chạy Docker, Root Directory = `06-lab-complete`) + Key Value (Redis) free, cùng region Singapore.
+- **URL public:** https://day14-agent-hgvs.onrender.com
+- **4 lệnh tự kiểm (CP6):**
+  ```text
+  GET  /health                  -> 200   {"status":"ok"}
+  GET  /ready                   -> 200   {"ready":true}        # Redis trên Render nối OK
+  POST /ask  (không X-API-Key)  -> 401   {"detail":"Missing or invalid API key..."}
+  POST /ask  (có X-API-Key)     -> 200   {"question":"...","answer":"Deployment là quá trình..."}
+  ```
+- **Biến môi trường đặt trên Render (không ghi trong code):** `AGENT_API_KEY` (secret), `REDIS_URL` (internal Key Value), `ENVIRONMENT=production`, `RATE_LIMIT_PER_MINUTE`, `DAILY_BUDGET_USD`, `MONTHLY_BUDGET_USD`. `PORT` do Render tự inject.
+- **Screenshot:** `screenshots/dashboard.png`, `screenshots/running.png`, `screenshots/test.png`.
 
 ### So sánh railway.toml vs render.yaml
 
-<!-- CP6 -->
+| Khía cạnh | `railway.toml` | `render.yaml` |
+|-----------|----------------|---------------|
+| Định dạng | TOML | YAML (Blueprint) |
+| Phạm vi | Cấu hình **một** service (build + deploy) | Khai báo **nhiều** service trong một file: web + redis |
+| Builder/Dockerfile | `[build] builder = "DOCKERFILE"` | `runtime: docker` + `dockerfilePath` |
+| Health check | `[deploy] healthcheckPath = "/health"` | `healthCheckPath: /health` |
+| Secret (AGENT_API_KEY) | Đặt trên dashboard/CLI (`railway variables set`), không nằm trong file | Khai trong file an toàn: `generateValue: true` (không ghi giá trị) |
+| Redis/REDIS_URL | Thêm service Redis trên dashboard rồi tham chiếu biến | Khai ngay trong file: service `type: redis` + `fromService ... property: connectionString` |
+| Port | Dựa vào `$PORT` nền tảng cấp (Dockerfile `CMD` đọc `${PORT}`) | Tương tự, `$PORT` tự inject |
 
-### Exercise 3.3 — Cloud Run pipeline (3–5 dòng)
+Khác nhau cốt lõi: `render.yaml` mang tính **khai báo đầy đủ** (một file dựng cả app + Redis + cách lấy secret/biến), còn `railway.toml` chỉ lo phần build/deploy của một service, phần Redis và secret wiring làm qua dashboard.
 
-<!-- CP6 -->
+### Exercise 3.3 — Cloud Run pipeline (đọc `cloudbuild.yaml` + `service.yaml`)
+
+Pipeline CI/CD trong `cloudbuild.yaml` chạy khi push lên `main`, gồm 4 bước nối tiếp (`waitFor`): (1) **test** — chạy `pytest` trong `python:3.11-slim`; (2) **build** — `docker build` gắn tag `$COMMIT_SHA` + `latest`, dùng `--cache-from` để tái dùng layer cache; (3) **push** — đẩy image `--all-tags` lên Container Registry `gcr.io`; (4) **deploy** — `gcloud run deploy` lên Cloud Run (region `asia-southeast1`, `--allow-unauthenticated`, `min-instances=1` tránh cold start, `max-instances=10`, 512Mi/1 CPU, env `ENVIRONMENT=production`, secret lấy từ **Secret Manager**). Kèm theo `service.yaml` là bản IaC (Knative Service): autoscaling min 1/max 10, `containerConcurrency: 80`, resources limits/requests, biến môi trường + `AGENT_API_KEY`/`OPENAI_API_KEY` lấy từ Secret Manager, `livenessProbe` gọi `/health` và `startupProbe` gọi `/ready`.
 
 ---
 
@@ -324,4 +344,6 @@ Chạy `python check_production_ready.py` (đầy đủ, có Docker) trong `06-l
 - **CP2 (Part 2 answers):** Hỏi AI cách đọc Dockerfile multi-stage và compose. Tự kiểm tra: tự build 2 image và đo `docker images` (develop 1.67 GB, advanced 240 MB), tự chạy container develop + stack compose và curl qua Nginx; mọi con số MB là số mình đo, không chép từ README.
 - **CP3 (Part 4 answers):** Hỏi AI cách lấy JWT token và tạo vòng lặp curl để thấy 429. Tự kiểm tra: tự chạy bản develop + production, tự lấy token `student/demo123`, tự chạy vòng 13 request và thấy 429 từ request thứ 11 (header `retry-after`). Token đã che trước khi dán.
 - **CP4 (Part 5 answers):** Hỏi AI về khác biệt liveness/readiness và stateless. Tự kiểm tra: tự `docker compose up --scale agent=3` rồi chạy `test_stateless.py`, quan sát 3 instance ID thật và history 10 message; số liệu trong bài là output mình chạy.
+- **CP6 (Part 3 — deploy):** Dùng AI hướng dẫn deploy agent Part 6 lên Render (Web Service Docker + Key Value Redis) và viết so sánh railway.toml/render.yaml + mô tả pipeline Cloud Run. Tự kiểm tra: tự chạy 4 lệnh curl vào URL public → 200/200/401/200; `AGENT_API_KEY` đặt trên nền tảng, không commit vào repo.
+- **CP7 (Part 7 — benchmark):** Dùng AI hướng dẫn chạy load_test/run_eval và cách sửa KNOWLEDGE_BASE. Tự kiểm tra: tự chạy load test 4 mức concurrency + 3 mức MOCK_SLOW_RATE, eval v1/v2/v2-fixed; mọi số trong BENCHMARK_REPORT là từ file JSON mình chạy (eval cuối `✅ PASS`, exit 0).
 - **CP5 (Part 6 — code):** Dùng AI gợi ý cách sửa các `TODO` trong `06-lab-complete/app/` (config từ env, APIKeyHeader→401, rate limit sliding-window Redis sorted set, cost guard Redis, JsonFormatter, lifespan, Dockerfile multi-stage, compose, railway/render). Mình đọc kỹ `check_production_ready.py` để hiểu từng tiêu chí (vd `/health` phải 200 khi Redis chết, `/ready` 503; state rate-limit phải nằm trong Redis để sống qua restart; uvicorn phải là PID 1 cho SIGTERM). Tự kiểm tra: chạy `check_production_ready.py --skip-docker` (39/39) rồi bản đầy đủ có Docker → **PASS 12/12 (43/43 checks)**, giải thích được từng dòng code khi được hỏi.
