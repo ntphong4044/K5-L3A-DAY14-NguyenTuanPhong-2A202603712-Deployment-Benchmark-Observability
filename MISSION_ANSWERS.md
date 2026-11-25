@@ -10,7 +10,7 @@
 - **OS làm bài:** WSL2 Ubuntu 26.04 LTS (bắt buộc để CP5 test SIGTERM/graceful shutdown; kiểm tra `python -c "import os; print(os.name)"` → `posix`).
 - **Python:** cài bằng `uv` (binary tải về user-dir, không `sudo`): CPython 3.12.16 trong venv `~/day14venv`. Lý do không dùng Python 3.14 mặc định của distro: `pydantic==2.9.0` / `psutil` chưa có wheel sẵn cho 3.14.
 - **Docker:** Docker Desktop 29.9.3 + Compose v5.7.0 (chạy qua WSL integration).
-- **Self-check CP0:** `docker run --rm hello-world` → *(điền kết quả sau khi bật WSL integration cho distro Ubuntu)*.
+- **Self-check CP0:** `docker run --rm hello-world` → in "Hello from Docker! This message shows that your installation appears to be working correctly." (sau khi bật WSL integration cho distro Ubuntu trong Docker Desktop).
 
 ---
 
@@ -77,21 +77,76 @@ Log server (stdout) — lộ secret, đúng anti-pattern #3:
 
 ## Part 2 — Docker
 
-### Exercise 2.1 — Đọc Dockerfile (4 câu hỏi)
+### Exercise 2.1 — Đọc Dockerfile (`02-docker/develop/Dockerfile`)
 
-<!-- CP2 -->
+1. **Base image:** `python:3.11` — bản Python đầy đủ (~1 GB), gồm cả build tools.
+2. **Working directory:** `/app` (`WORKDIR /app`); mọi `COPY`/`RUN` sau đó tính tương đối từ đây.
+3. **Vì sao `COPY requirements.txt` trước rồi mới `COPY` code?** Để tận dụng Docker layer cache: layer `RUN pip install` chỉ bị rebuild khi `requirements.txt` đổi. Nếu copy toàn bộ code trước, mỗi lần sửa code sẽ invalidate luôn layer cài deps → build lại từ đầu, rất chậm.
+4. **CMD vs ENTRYPOINT:** `CMD` đặt lệnh/tham số **mặc định**, dễ override khi `docker run <image> <lệnh khác>`. `ENTRYPOINT` cố định phần thực thi, phần CMD/CLI được **nối thêm** làm tham số. Thực hành phổ biến: `ENTRYPOINT` = binary, `CMD` = tham số mặc định. File này dùng `CMD ["python","app.py"]` (exec form → nhận tín hiệu đúng).
 
-### Exercise 2.2 — Gọi container
+### Exercise 2.2 — Build & run container develop
 
-<!-- CP2 -->
+Build từ **gốc repo** (Dockerfile `COPY` theo path tính từ root):
+```bash
+docker build -f 02-docker/develop/Dockerfile -t my-agent:develop .
+docker run -d -p 8000:8000 my-agent:develop
+```
+Kết quả gọi container:
+```text
+GET /health -> {"status":"ok","uptime_seconds":0.3,"container":true}
+POST /ask?question=What is Docker? -> {"answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}
+POST /ask  (JSON body) -> HTTP 422   # develop nhận câu hỏi qua query param, không nhận JSON
+```
 
-### Exercise 2.3 — So sánh kích thước image (số đo thật)
+### Exercise 2.3 — Multi-stage build (`02-docker/production/Dockerfile`)
 
-<!-- CP2: develop MB, production MB, % chênh lệch (docker images) -->
+- **Stage 1 — builder** (`python:3.11-slim AS builder`): cài `gcc`, `libpq-dev`, rồi `pip install --user -r requirements.txt` vào `/root/.local`. Stage này có đủ build tools nhưng **không dùng để deploy**.
+- **Stage 2 — runtime** (`python:3.11-slim AS runtime`): bắt đầu từ image slim sạch, `COPY --from=builder /root/.local ...`, tạo user non-root `appuser`, có `HEALTHCHECK`, `CMD uvicorn main:app --workers 2`.
+- **Vì sao nhỏ hơn:** image cuối **không** chứa gcc/libpq-dev/pip cache/build layer — chỉ có Python runtime + site-packages cần để chạy.
+
+### So sánh kích thước image (số đo bằng `docker images`)
+
+| Image | Size (docker images) | Bytes (`docker image inspect`) |
+|-------|---------------------:|-------------------------------:|
+| `my-agent:develop` (single-stage, `python:3.11`) | **1.67 GB** | 1 667 792 323 |
+| `my-agent:advanced` (multi-stage, `python:3.11-slim`) | **240 MB** | 239 815 264 |
+
+**Chênh lệch:** `(1 667 792 323 − 239 815 264) / 1 667 792 323 = 85.6%` → bản production **nhỏ hơn ~85.6%** (chỉ còn ~14.4% dung lượng bản develop). Production < 500 MB như yêu cầu.
 
 ### Exercise 2.4 — Stack docker-compose + Nginx
 
-<!-- CP2: sơ đồ service + kết quả test qua Nginx -->
+4 service trên cùng bridge network `internal`:
+
+```text
+                 host:80/443
+                     │
+            ┌────────▼─────────┐
+   client ─▶│  nginx:alpine    │  reverse proxy + rate limit 10r/s
+            │ (reverse proxy)  │  upstream agent_backend -> agent:8000
+            └────────┬─────────┘
+                     │ proxy_pass http://agent:8000
+            ┌────────▼─────────┐
+            │  agent (FastAPI) │  build multi-stage, PORT 8000 (không expose ra host)
+            │  main:app x2 wk  │
+            └───┬──────────┬───┘
+      REDIS_URL │          │ QDRANT_URL
+      ┌─────────▼──┐   ┌───▼──────────┐
+      │ redis:7-   │   │ qdrant v1.9  │
+      │ alpine     │   │ vector DB    │
+      │ (cache/RL) │   │ (RAG)        │
+      └────────────┘   └──────────────┘
+```
+
+- **Giao tiếp:** client → `nginx:80` → `agent:8000` (qua DNS tên service trong network nội bộ); agent gọi `redis:6379` và `qdrant:6333`. agent `depends_on` redis + qdrant (`condition: service_healthy`), nginx `depends_on` agent.
+- **Khởi động:** `touch 02-docker/production/.env.local` rồi `docker compose -f 02-docker/production/docker-compose.yml -p k5-day14-docker up -d --build`. `ps` cho thấy redis/qdrant `healthy`, agent `health: starting`, nginx map `0.0.0.0:80->80`.
+- **Test qua Nginx (port 80):**
+```text
+GET  http://localhost/health -> {"status":"ok","uptime_seconds":0.3,"version":"2.0.0","timestamp":"2026-11-25T09:40:07..."}
+POST http://localhost/ask    -> {"answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé."}
+```
+Dọn stack: `docker compose -f 02-docker/production/docker-compose.yml -p k5-day14-docker down`.
+
+**Cần hiểu:** multi-stage giảm dung lượng nhờ stage runtime bỏ hết build tools; `COPY requirements.txt` đứng trước `COPY . .` để layer cài deps được cache lại giữa các lần build.
 
 ---
 
@@ -143,3 +198,4 @@ Log server (stdout) — lộ secret, đúng anti-pattern #3:
 
 - **CP0 (setup):** Dùng AI trợ lý (Claude Code) để dựng môi trường WSL: cài `uv`, tạo venv Python 3.12, cài `requirements.txt`. Tự kiểm tra: chạy `uv pip`, import `fastapi/pydantic/redis/jwt/psutil` thành công, xác nhận `os.name == posix`.
 - **CP1 (Part 1 answers):** Hỏi AI cách đọc anti-pattern trong `develop/app.py` và đối chiếu với `production/`. Tự kiểm tra: tự chạy bản develop bằng `uvicorn`, curl `/`, `/ask?question=`, `/ask` JSON (422) và `/health` (404); số liệu/HTTP code trong bài là output mình chạy được.
+- **CP2 (Part 2 answers):** Hỏi AI cách đọc Dockerfile multi-stage và compose. Tự kiểm tra: tự build 2 image và đo `docker images` (develop 1.67 GB, advanced 240 MB), tự chạy container develop + stack compose và curl qua Nginx; mọi con số MB là số mình đo, không chép từ README.
